@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:camunda="http://camunda.org/schema/1.0/bpmn"
+                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                  id="collectflow" targetNamespace="http://ericguerra.com/collectflow">
+
+  <bpmn:message id="msgPaymentReceived" name="PaymentReceived" />
+  <bpmn:error id="errNoContact" name="No contact" errorCode="NO_CONTACT" />
+
+  <bpmn:process id="dunning" name="Overdue account collections" isExecutable="true" camunda:historyTimeToLive="P180D">
+    <bpmn:startEvent id="start" name="Account became overdue" />
+    <bpmn:sequenceFlow id="f_start" sourceRef="start" targetRef="decide" />
+
+    <bpmn:serviceTask id="decide" name="Decide next step" camunda:delegateExpression="${decideNextStep}" />
+    <bpmn:sequenceFlow id="f_decide" sourceRef="decide" targetRef="route" />
+
+    <bpmn:exclusiveGateway id="route" name="Next action?" />
+    <bpmn:sequenceFlow id="f_stop" sourceRef="route" targetRef="endPaid">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">${nextAction == 'STOP'}</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="f_wait" sourceRef="route" targetRef="waitTimer">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">${nextAction == 'WAIT'}</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="f_notice" sourceRef="route" targetRef="sendNotice">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">${nextAction == 'FRIENDLY_REMINDER' || nextAction == 'FIRST_NOTICE' || nextAction == 'FINAL_NOTICE'}</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="f_call" sourceRef="route" targetRef="callCustomer">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">${nextAction == 'CALL_TASK'}</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="f_hold" sourceRef="route" targetRef="creditHold">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">${nextAction == 'CREDIT_HOLD'}</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="f_agency" sourceRef="route" targetRef="approveAgency">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">${nextAction == 'AGENCY_REVIEW'}</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+
+    <bpmn:intermediateCatchEvent id="waitTimer" name="Wait">
+      <bpmn:timerEventDefinition><bpmn:timeDuration xsi:type="bpmn:tFormalExpression">${waitDuration}</bpmn:timeDuration></bpmn:timerEventDefinition>
+    </bpmn:intermediateCatchEvent>
+    <bpmn:sequenceFlow id="f_wait_back" sourceRef="waitTimer" targetRef="decide" />
+
+    <bpmn:serviceTask id="sendNotice" name="Send notice" camunda:delegateExpression="${sendNotice}" camunda:asyncBefore="true">
+      <bpmn:extensionElements><camunda:failedJobRetryTimeCycle>R3/PT10M</camunda:failedJobRetryTimeCycle></bpmn:extensionElements>
+    </bpmn:serviceTask>
+    <bpmn:sequenceFlow id="f_notice_back" sourceRef="sendNotice" targetRef="decide" />
+    <bpmn:boundaryEvent id="noContact" attachedToRef="sendNotice">
+      <bpmn:errorEventDefinition errorRef="errNoContact" />
+    </bpmn:boundaryEvent>
+    <bpmn:sequenceFlow id="f_nocontact" sourceRef="noContact" targetRef="findContact" />
+    <bpmn:userTask id="findContact" name="Find billing contact" camunda:candidateGroups="ar-clerks" camunda:dueDate="${dateTime().plusDays(3).toDate()}" />
+    <bpmn:sequenceFlow id="f_found" sourceRef="findContact" targetRef="decide" />
+
+    <bpmn:userTask id="callCustomer" name="Call customer" camunda:candidateGroups="collectors" camunda:dueDate="${dateTime().plusDays(2).toDate()}">
+      <bpmn:extensionElements>
+        <camunda:formData>
+          <camunda:formField id="callOutcome" label="Outcome" type="enum">
+            <camunda:value id="PROMISE_TO_PAY" name="Promise to pay" />
+            <camunda:value id="DISPUTE" name="Customer disputes" />
+            <camunda:value id="NO_ANSWER" name="No answer" />
+          </camunda:formField>
+          <camunda:formField id="promiseDate" label="Promise date (YYYY-MM-DD)" type="string" />
+        </camunda:formData>
+      </bpmn:extensionElements>
+    </bpmn:userTask>
+    <bpmn:sequenceFlow id="f_called" sourceRef="callCustomer" targetRef="recordCall" />
+    <bpmn:serviceTask id="recordCall" name="Record call outcome" camunda:delegateExpression="${recordCallOutcome}" />
+    <bpmn:sequenceFlow id="f_recorded" sourceRef="recordCall" targetRef="decide" />
+
+    <bpmn:serviceTask id="creditHold" name="Place credit hold" camunda:delegateExpression="${applyCreditHold}" />
+    <bpmn:sequenceFlow id="f_held" sourceRef="creditHold" targetRef="decide" />
+
+    <bpmn:userTask id="approveAgency" name="Approve agency referral" camunda:candidateGroups="finance-managers" />
+    <bpmn:sequenceFlow id="f_agency_done" sourceRef="approveAgency" targetRef="endAgency" />
+
+    <bpmn:endEvent id="endPaid" name="Resolved" />
+    <bpmn:endEvent id="endAgency" name="Referred to agency" />
+
+    <!-- Payment can arrive at any time: cancel whatever step we're in. -->
+    <bpmn:subProcess id="onPayment" triggeredByEvent="true">
+      <bpmn:startEvent id="paymentArrived" isInterrupting="true">
+        <bpmn:messageEventDefinition messageRef="msgPaymentReceived" />
+      </bpmn:startEvent>
+      <bpmn:sequenceFlow id="f_pay" sourceRef="paymentArrived" targetRef="recheck" />
+      <bpmn:serviceTask id="recheck" name="Re-evaluate balance" camunda:delegateExpression="${decideNextStep}" />
+      <bpmn:sequenceFlow id="f_recheck" sourceRef="recheck" targetRef="paidCheck" />
+      <bpmn:exclusiveGateway id="paidCheck" default="f_still_owes" />
+      <bpmn:sequenceFlow id="f_settled" sourceRef="paidCheck" targetRef="endSettled">
+        <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">${nextAction == 'STOP'}</bpmn:conditionExpression>
+      </bpmn:sequenceFlow>
+      <bpmn:sequenceFlow id="f_still_owes" sourceRef="paidCheck" targetRef="restart" />
+      <bpmn:endEvent id="endSettled" name="Paid" />
+      <bpmn:endEvent id="restart" name="Partial payment: new cycle">
+        <bpmn:extensionElements>
+          <camunda:executionListener event="end" expression="${execution.getProcessEngineServices().getRuntimeService().createProcessInstanceByKey('dunning').setVariable('customerId', customerId).execute()}" />
+        </bpmn:extensionElements>
+      </bpmn:endEvent>
+    </bpmn:subProcess>
+  </bpmn:process>
+</bpmn:definitions>
