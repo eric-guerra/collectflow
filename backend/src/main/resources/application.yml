@@ -1,0 +1,12 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:5432/collectflow
+    username: ${DB_USER:collect}
+    password: ${DB_PASSWORD:collect}
+camunda:
+  bpm:
+    admin-user: { id: admin, password: "${CAMUNDA_ADMIN_PASSWORD}" }
+    job-execution: { enabled: true }
+    generic-properties:
+      properties:
+        historyCleanupBatchWindowStartTime: "01:00"
